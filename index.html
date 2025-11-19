@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delta - The Path of Least Error</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #87CEEB; user-select: none; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #blocker { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10; backdrop-filter: blur(5px); transition: opacity 0.5s; }
+        #minimap-container { position: absolute; bottom: 20px; right: 20px; width: 150px; height: 150px; background: rgba(255, 255, 255, 0.8); border: 2px solid #333; border-radius: 8px; overflow: hidden; z-index: 5; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        #minimap { width: 100%; height: 100%; }
+        .hud-text { position: absolute; top: 20px; left: 20px; color: white; text-shadow: 1px 1px 2px black; font-size: 1.2rem; font-weight: bold; pointer-events: none; }
+        #win-msg { display: none; position: absolute; top: 40%; width: 100%; text-align: center; color: #ffff00; font-size: 3rem; font-weight: 800; text-shadow: 2px 2px 4px #000; z-index: 8; pointer-events: none; animation: popIn 0.5s ease-out; }
+        
+        @keyframes popIn { from { transform: scale(0); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        
+        .btn {
+            background: linear-gradient(to bottom, #4ade80, #22c55e);
+            border: 4px solid #15803d;
+            color: white;
+            padding: 15px 40px;
+            font-size: 1.5rem;
+            border-radius: 12px;
+            cursor: pointer;
+            box-shadow: 0 6px 0 #15803d, 0 10px 10px rgba(0,0,0,0.2);
+            transition: transform 0.1s, box-shadow 0.1s;
+            text-transform: uppercase;
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+        .btn:active { transform: translateY(6px); box-shadow: 0 0 0 #15803d, inset 0 2px 4px rgba(0,0,0,0.2); }
+        
+        #instructions { color: #eee; margin-top: 20px; font-size: 1rem; max-width: 600px; text-align: center; line-height: 1.5; }
+    </style>
+</head>
+<body>
+
+    <!-- HUD -->
+    <div id="hud" class="hud-text">
+        <div>Height: <span id="height-display">0.00</span></div>
+        <div style="font-size: 0.9rem; font-weight: normal; color: #ddd;">Minimize your error (Find the lowest point)</div>
+    </div>
+
+    <!-- Win Message -->
+    <div id="win-msg">GLOBAL MINIMUM FOUND!</div>
+
+    <!-- Minimap -->
+    <div id="minimap-container">
+        <canvas id="minimap"></canvas>
+    </div>
+
+    <!-- Start Screen -->
+    <div id="blocker">
+        <h1 style="font-size: 3rem; color: white; margin-bottom: 10px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">Delta</h1>
+        <h2 style="font-size: 1.5rem; color: #eee; margin-top: 0; margin-bottom: 30px; text-shadow: 0 1px 2px rgba(0,0,0,0.5);">The Path of Least Error</h2>
+        <button id="play-btn" class="btn">Start Descent</button>
+        <div id="instructions">
+            <p><strong>Goal:</strong> Explore the cost function terrain to find the Global Minimum.</p>
+            <p><strong>Controls:</strong> WASD to Move • Mouse to Look • Shift to Sprint</p>
+        </div>
+    </div>
+
+    <script>
+        // --- Game Constants & State ---
+        const WORLD_SIZE = 200; 
+        const HALF_WORLD = WORLD_SIZE / 2;
+        const SEGMENTS = 200; 
+        
+        let camera, scene, renderer;
+        let controls;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let prevTime = performance.now();
+        let velocity = new THREE.Vector3();
+        let direction = new THREE.Vector3();
+        
+        let terrainMesh;
+        let birds = [];
+        let grassSystem;
+        
+        // Math for terrain generation
+        let globalMinima = { x: 0, z: 0, depth: 0 };
+        let localMinimas = [];
+        
+        // Audio Context
+        let audioCtx;
+        let masterGain;
+        let delayNode; 
+        let nextBirdTime = 0;
+        let nextNoteTime = 0;
+        
+        // Minimap
+        const minimapCanvas = document.getElementById('minimap');
+        const minimapCtx = minimapCanvas.getContext('2d');
+        minimapCanvas.width = 150;
+        minimapCanvas.height = 150;
+
+        let isPlaying = false;
+        let hasWon = false;
+        let shiftPressed = false;
+
+        // --- Terrain Generation Logic ---
+        
+        function generateMinimaLocations() {
+            localMinimas = [];
+            
+            globalMinima.x = (Math.random() * 0.8 - 0.4) * WORLD_SIZE;
+            globalMinima.z = (Math.random() * 0.8 - 0.4) * WORLD_SIZE;
+            globalMinima.depth = 20 + Math.random() * 5; 
+
+            const count = 5 + Math.floor(Math.random() * 5);
+            for(let i=0; i<count; i++) {
+                let lx, lz;
+                let tooClose = true;
+                while(tooClose) {
+                    lx = (Math.random() * 0.8 - 0.4) * WORLD_SIZE;
+                    lz = (Math.random() * 0.8 - 0.4) * WORLD_SIZE;
+                    const dist = Math.sqrt((lx - globalMinima.x)**2 + (lz - globalMinima.z)**2);
+                    if(dist > 25) tooClose = false;
+                }
+                localMinimas.push({
+                    x: lx, 
+                    z: lz, 
+                    depth: 8 + Math.random() * 8,
+                    width: 8 + Math.random() * 8
+                });
+            }
+        }
+
+        function getTerrainHeight(x, z) {
+            let y = Math.sin(x * 0.05) * Math.cos(z * 0.05) * 4; 
+            y += Math.sin(x * 0.02 + 10) * Math.cos(z * 0.02 + 10) * 6;
+
+            let distSqGlobal = (x - globalMinima.x)**2 + (z - globalMinima.z)**2;
+            let globalGauss = globalMinima.depth * Math.exp(-distSqGlobal / 300);
+            y -= globalGauss;
+
+            localMinimas.forEach(min => {
+                let distSq = (x - min.x)**2 + (z - min.z)**2;
+                let localGauss = min.depth * Math.exp(-distSq / (min.width * 15));
+                y -= localGauss;
+            });
+
+            y += Math.sin(x*0.2)*Math.cos(z*0.2)*0.3;
+
+            return y;
+        }
+
+        // --- Improved Audio System ---
+        function initAudio() {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            audioCtx = new AudioContext();
+            masterGain = audioCtx.createGain();
+            masterGain.gain.value = 0.4;
+            
+            // Create Delay Effect for "Spacey" feel
+            delayNode = audioCtx.createDelay();
+            delayNode.delayTime.value = 0.4; // 400ms echo
+            const delayFeedback = audioCtx.createGain();
+            delayFeedback.gain.value = 0.3; // Decay
+            const delayFilter = audioCtx.createBiquadFilter();
+            delayFilter.type = 'lowpass';
+            delayFilter.frequency.value = 1000; // Dampen echoes
+
+            // Routing: Source -> Delay -> Feedback -> Delay
+            delayNode.connect(delayFeedback);
+            delayFeedback.connect(delayFilter);
+            delayFilter.connect(delayNode);
+            
+            // Master Routing
+            delayNode.connect(masterGain);
+            masterGain.connect(audioCtx.destination);
+
+            startAmbience();
+            
+            // Start music immediately
+            nextNoteTime = audioCtx.currentTime + 0.5;
+            nextBirdTime = audioCtx.currentTime + 2.0;
+        }
+
+        function startAmbience() {
+            // Wind
+            const bufferSize = 2 * audioCtx.sampleRate;
+            const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const output = noiseBuffer.getChannelData(0);
+            
+            let lastOut = 0;
+            for (let i = 0; i < bufferSize; i++) {
+                const white = Math.random() * 2 - 1;
+                output[i] = (lastOut + (0.02 * white)) / 1.02;
+                lastOut = output[i];
+                output[i] *= 3.5; 
+            }
+
+            const noise = audioCtx.createBufferSource();
+            noise.buffer = noiseBuffer;
+            noise.loop = true;
+            
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 150; // Deep rumble
+            
+            const windGain = audioCtx.createGain();
+            windGain.gain.value = 0.6;
+
+            noise.connect(filter);
+            filter.connect(windGain);
+            windGain.connect(masterGain);
+            noise.start();
+        }
+
+        function playMusicNote() {
+            // Pentatonic Scale
+            const notes = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25]; 
+            const freq = notes[Math.floor(Math.random() * notes.length)];
+            const now = audioCtx.currentTime;
+
+            // Dual Oscillator for richer sound
+            const osc1 = audioCtx.createOscillator();
+            const osc2 = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            
+            osc1.type = 'sine';
+            osc2.type = 'triangle';
+            
+            osc1.frequency.setValueAtTime(freq, now);
+            osc2.frequency.setValueAtTime(freq * 1.002, now); // Slight detune
+            
+            // Envelope
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(0.1, now + 1.5); // Slow attack
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 5.0); // Long release
+
+            osc1.connect(gain);
+            osc2.connect(gain);
+            
+            // Connect to Master AND Delay
+            gain.connect(masterGain);
+            gain.connect(delayNode);
+            
+            osc1.start();
+            osc2.start();
+            osc1.stop(now + 6.0);
+            osc2.stop(now + 6.0);
+        }
+
+        function playBirdChirp() {
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            
+            osc.type = 'sine';
+            
+            // Complex pitch envelope for bird
+            const startFreq = 2500 + Math.random() * 1000;
+            osc.frequency.setValueAtTime(startFreq, now);
+            osc.frequency.exponentialRampToValueAtTime(startFreq + 500, now + 0.05);
+            osc.frequency.exponentialRampToValueAtTime(startFreq - 300, now + 0.15);
+            osc.frequency.linearRampToValueAtTime(startFreq + 200, now + 0.25);
+
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(0.05, now + 0.02);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+
+            // Filter to soften it slightly
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.value = 3000;
+
+            osc.connect(filter);
+            filter.connect(gain);
+            gain.connect(masterGain);
+            
+            // Add a tiny bit of delay for distance
+            gain.connect(delayNode);
+
+            osc.start();
+            osc.stop(now + 0.5);
+        }
+
+        function playWinSound() {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'triangle';
+            const now = audioCtx.currentTime;
+            
+            osc.frequency.setValueAtTime(523.25, now);
+            osc.frequency.setValueAtTime(659.25, now + 0.2);
+            osc.frequency.setValueAtTime(783.99, now + 0.4);
+
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(0.2, now + 0.2);
+            gain.gain.linearRampToValueAtTime(0, now + 2.5);
+
+            osc.connect(gain);
+            gain.connect(masterGain);
+            gain.connect(delayNode);
+            osc.start();
+            osc.stop(now + 3);
+        }
+
+        // --- Initialization ---
+        function init() {
+            generateMinimaLocations();
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.FogExp2(0x87CEEB, 0.012);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            // Lighting
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            hemiLight.position.set(0, 200, 0);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffdfba, 0.9);
+            dirLight.position.set(50, 100, 50);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            dirLight.shadow.camera.top = 100;
+            dirLight.shadow.camera.bottom = -100;
+            dirLight.shadow.camera.left = -100;
+            dirLight.shadow.camera.right = 100;
+            scene.add(dirLight);
+
+            // Sun
+            const sunGeo = new THREE.SphereGeometry(8, 32, 32);
+            const sunMat = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+            const sun = new THREE.Mesh(sunGeo, sunMat);
+            sun.position.copy(dirLight.position).multiplyScalar(0.8);
+            scene.add(sun);
+
+            // Terrain
+            const geometry = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, SEGMENTS, SEGMENTS);
+            geometry.rotateX(-Math.PI / 2);
+
+            const vertices = geometry.attributes.position.array;
+            for (let i = 0; i < vertices.length; i += 3) {
+                const x = vertices[i];
+                const z = vertices[i + 2];
+                vertices[i + 1] = getTerrainHeight(x, z);
+            }
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshStandardMaterial({ 
+                color: 0x6ebf4e,
+                roughness: 0.9,
+                metalness: 0.1,
+                flatShading: false
+            });
+
+            terrainMesh = new THREE.Mesh(geometry, material);
+            terrainMesh.receiveShadow = true;
+            scene.add(terrainMesh);
+
+            // --- Vegetation ---
+            
+            // Trees
+            const treeCount = 350;
+            const trunkGeo = new THREE.CylinderGeometry(0.3, 0.5, 2, 6);
+            const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5c4033 });
+            const leavesGeo = new THREE.IcosahedronGeometry(2.5, 0); 
+            const leavesMat = new THREE.MeshStandardMaterial({ color: 0x3a7a3a, flatShading: true });
+
+            const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, treeCount);
+            const leavesMesh = new THREE.InstancedMesh(leavesGeo, leavesMat, treeCount);
+            
+            const dummy = new THREE.Object3D();
+            let tIdx = 0;
+            
+            for(let i=0; i<treeCount*2; i++) { 
+                if(tIdx >= treeCount) break;
+                const x = (Math.random() - 0.5) * WORLD_SIZE;
+                const z = (Math.random() - 0.5) * WORLD_SIZE;
+                const y = getTerrainHeight(x, z);
+                if (y < -5) continue; 
+
+                const scaleMod = 0.8 + Math.random() * 0.6;
+                dummy.position.set(x, y + 1.0 * scaleMod, z);
+                dummy.rotation.set(0, Math.random()*Math.PI, 0);
+                dummy.scale.set(scaleMod, scaleMod, scaleMod);
+                dummy.updateMatrix();
+                trunkMesh.setMatrixAt(tIdx, dummy.matrix);
+
+                dummy.position.set(x, y + 2.8 * scaleMod, z);
+                dummy.scale.set(scaleMod, scaleMod, scaleMod);
+                dummy.updateMatrix();
+                leavesMesh.setMatrixAt(tIdx, dummy.matrix);
+                tIdx++;
+            }
+            trunkMesh.receiveShadow = true; trunkMesh.castShadow = true;
+            leavesMesh.receiveShadow = true; leavesMesh.castShadow = true;
+            scene.add(trunkMesh);
+            scene.add(leavesMesh);
+
+            // Grass: "Tufts" (Groups of blades)
+            const grassClumps = 1000; // Fewer locations...
+            const bladesPerClump = 3; // ...but more blades per location
+            const totalGrassInstances = grassClumps * bladesPerClump;
+            
+            const grassGeo = new THREE.ConeGeometry(0.15, 0.6, 3);
+            const grassMat = new THREE.MeshStandardMaterial({ color: 0x8fd66a, flatShading: true });
+            grassSystem = new THREE.InstancedMesh(grassGeo, grassMat, totalGrassInstances);
+            
+            let gIdx = 0;
+            for(let i=0; i<grassClumps*2; i++) {
+                if(gIdx >= totalGrassInstances) break;
+                
+                // Clump center
+                const cx = (Math.random() - 0.5) * WORLD_SIZE;
+                const cz = (Math.random() - 0.5) * WORLD_SIZE;
+                const cy = getTerrainHeight(cx, cz);
+                
+                if (cy < -15) continue; // No underwater grass
+
+                // Create 3 blades around this center
+                for(let j=0; j<bladesPerClump; j++) {
+                    if(gIdx >= totalGrassInstances) break;
+                    
+                    // Random offset for natural look
+                    const ox = (Math.random() - 0.5) * 0.5; 
+                    const oz = (Math.random() - 0.5) * 0.5;
+                    
+                    dummy.position.set(cx + ox, cy + 0.3, cz + oz);
+                    
+                    // Random rotation
+                    dummy.rotation.set(
+                        (Math.random() - 0.5) * 0.4, // lean x
+                        Math.random() * Math.PI * 2, // face any direction
+                        (Math.random() - 0.5) * 0.4  // lean z
+                    );
+                    
+                    // Random scale
+                    dummy.scale.set(1, 0.8 + Math.random() * 0.5, 1);
+                    
+                    dummy.updateMatrix();
+                    grassSystem.setMatrixAt(gIdx, dummy.matrix);
+                    gIdx++;
+                }
+            }
+            scene.add(grassSystem);
+
+            // Birds
+            const birdGeo = new THREE.BufferGeometry();
+            const birdVerts = new Float32Array([0.2, 0, 0, -0.2, 0, 0, 0, 0, 0.2]);
+            birdGeo.setAttribute('position', new THREE.BufferAttribute(birdVerts, 3));
+            const birdMat = new THREE.MeshBasicMaterial({ color: 0x222222, side: THREE.DoubleSide });
+            
+            for(let i=0; i<15; i++) {
+                const bird = new THREE.Mesh(birdGeo, birdMat);
+                bird.userData = {
+                    speed: 0.05 + Math.random() * 0.05,
+                    angle: Math.random() * Math.PI * 2,
+                    centerY: 20 + Math.random() * 15,
+                    radius: 20 + Math.random() * 60
+                };
+                scene.add(bird);
+                birds.push(bird);
+            }
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new THREE.Object3D();
+            controls.position.y = 1.2; 
+            controls.add(camera);
+            scene.add(controls);
+
+            let safe = false;
+            while(!safe) {
+                controls.position.x = (Math.random() - 0.5) * WORLD_SIZE * 0.9;
+                controls.position.z = (Math.random() - 0.5) * WORLD_SIZE * 0.9;
+                const h = getTerrainHeight(controls.position.x, controls.position.z);
+                if(h > -2) safe = true; 
+                controls.position.y = h + 1.2; 
+            }
+
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            document.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('resize', onWindowResize);
+
+            animate();
+        }
+
+        const onKeyDown = function (event) {
+            switch (event.code) {
+                case 'ArrowUp': case 'KeyW': moveForward = true; break;
+                case 'ArrowLeft': case 'KeyA': moveLeft = true; break;
+                case 'ArrowDown': case 'KeyS': moveBackward = true; break;
+                case 'ArrowRight': case 'KeyD': moveRight = true; break;
+                case 'ShiftLeft': case 'ShiftRight': shiftPressed = true; break;
+            }
+        };
+
+        const onKeyUp = function (event) {
+            switch (event.code) {
+                case 'ArrowUp': case 'KeyW': moveForward = false; break;
+                case 'ArrowLeft': case 'KeyA': moveLeft = false; break;
+                case 'ArrowDown': case 'KeyS': moveBackward = false; break;
+                case 'ArrowRight': case 'KeyD': moveRight = false; break;
+                case 'ShiftLeft': case 'ShiftRight': shiftPressed = false; break;
+            }
+        };
+
+        let pitch = 0;
+        let yaw = 0;
+        const onMouseMove = function (event) {
+            if (!isPlaying || hasWon) return;
+            const movementX = event.movementX || 0;
+            const movementY = event.movementY || 0;
+            yaw -= movementX * 0.002;
+            pitch -= movementY * 0.002;
+            pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+            controls.rotation.y = yaw;
+            camera.rotation.x = pitch;
+        };
+
+        const blocker = document.getElementById('blocker');
+        const playBtn = document.getElementById('play-btn');
+
+        playBtn.addEventListener('click', function () {
+            blocker.style.opacity = 0;
+            setTimeout(() => blocker.style.display = 'none', 500);
+            document.body.requestPointerLock();
+            initAudio();
+            isPlaying = true;
+        });
+
+        document.addEventListener('pointerlockchange', function() {
+            if (document.pointerLockElement !== document.body) {
+                if(!hasWon) {
+                    blocker.style.display = 'flex';
+                    blocker.style.opacity = 1;
+                    isPlaying = false;
+                }
+            }
+        });
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function updateMinimap() {
+            minimapCtx.fillStyle = '#fff';
+            minimapCtx.fillRect(0,0,150,150);
+            const scale = 150 / WORLD_SIZE;
+            minimapCtx.strokeStyle = '#ccc';
+            minimapCtx.lineWidth = 2;
+            minimapCtx.strokeRect(0, 0, 150, 150);
+            const px = (controls.position.x + HALF_WORLD) * scale;
+            const pz = (controls.position.z + HALF_WORLD) * scale;
+            if(px >= 0 && px <= 150 && pz >= 0 && pz <= 150) {
+                minimapCtx.fillStyle = 'red';
+                minimapCtx.beginPath();
+                minimapCtx.arc(px, pz, 4, 0, Math.PI*2);
+                minimapCtx.fill();
+                minimapCtx.strokeStyle = 'rgba(255, 0, 0, 0.3)';
+                minimapCtx.beginPath();
+                minimapCtx.moveTo(px, pz);
+                const aimX = px - Math.sin(yaw) * 20;
+                const aimZ = pz - Math.cos(yaw) * 20;
+                minimapCtx.lineTo(aimX, aimZ);
+                minimapCtx.stroke();
+            }
+        }
+
+        function checkWinCondition(currentHeight, x, z) {
+            if(hasWon) return;
+            const dx = x - globalMinima.x;
+            const dz = z - globalMinima.z;
+            const dist = Math.sqrt(dx*dx + dz*dz);
+            if (dist < 4) {
+                const expectedLow = getTerrainHeight(globalMinima.x, globalMinima.z);
+                if (Math.abs(currentHeight - expectedLow) < 3.0) {
+                    hasWon = true;
+                    document.getElementById('win-msg').style.display = 'block';
+                    playWinSound();
+                }
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = performance.now();
+            const delta = (time - prevTime) / 1000;
+            prevTime = time;
+
+            if (isPlaying && !hasWon) {
+                // Music
+                if (audioCtx && audioCtx.currentTime > nextNoteTime) {
+                    playMusicNote();
+                    nextNoteTime = audioCtx.currentTime + 2 + Math.random() * 3;
+                }
+                
+                // Birds
+                if (audioCtx && audioCtx.currentTime > nextBirdTime) {
+                    // 40% chance to chirp
+                    if(Math.random() < 0.4) playBirdChirp();
+                    nextBirdTime = audioCtx.currentTime + 1.5 + Math.random() * 4.0;
+                }
+
+                // Movement
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+
+                direction.z = Number(moveBackward) - Number(moveForward); 
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                const speed = shiftPressed ? 15.0 : 7.0;
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * 50.0 * delta * (speed/7.0);
+                if (moveLeft || moveRight) velocity.x -= direction.x * 50.0 * delta * (speed/7.0);
+
+                const sinY = Math.sin(yaw);
+                const cosY = Math.cos(yaw);
+                
+                const dx = - (velocity.z * sinY) - (velocity.x * cosY); 
+                const dz = - (velocity.z * cosY) + (velocity.x * sinY);
+
+                controls.position.x += dx * delta;
+                controls.position.z += dz * delta;
+
+                if (controls.position.x < -HALF_WORLD) controls.position.x = -HALF_WORLD;
+                if (controls.position.x > HALF_WORLD) controls.position.x = HALF_WORLD;
+                if (controls.position.z < -HALF_WORLD) controls.position.z = -HALF_WORLD;
+                if (controls.position.z > HALF_WORLD) controls.position.z = HALF_WORLD;
+
+                const terrainH = getTerrainHeight(controls.position.x, controls.position.z);
+                controls.position.y = terrainH + 1.2;
+
+                document.getElementById('height-display').innerText = terrainH.toFixed(2);
+
+                birds.forEach(bird => {
+                    const bTime = time * 0.001 * bird.userData.speed;
+                    bird.position.x = Math.sin(bTime + bird.userData.angle) * bird.userData.radius;
+                    bird.position.z = Math.cos(bTime + bird.userData.angle) * bird.userData.radius;
+                    bird.position.y = bird.userData.centerY + Math.sin(bTime * 3) * 2;
+                    bird.rotation.y = -bTime - bird.userData.angle;
+                });
+
+                checkWinCondition(terrainH, controls.position.x, controls.position.z);
+            }
+
+            updateMinimap();
+            renderer.render(scene, camera);
+        }
+        
+        init();
+
+    </script>
+</body>
+</html>
