@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Delta - The Path of Least Error</title>
+    <!-- Core Three.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- OrbitControls for interactive 3D win screen -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script> 
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body {
@@ -30,6 +33,20 @@
             z-index: 10;
             backdrop-filter: blur(5px);
             transition: opacity 0.5s;
+        }
+
+        /* Transition Fade Overlay */
+        #transition-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: white;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 50;
+            transition: opacity 1.5s ease-in-out;
         }
 
         /* HUD / Minimap Container Styles */
@@ -95,7 +112,7 @@
             letter-spacing: 1px;
         }
 
-        /* Win Screen */
+        /* Win Screen & 3D Viewer Styles */
         #win-overlay {
             display: none;
             position: absolute;
@@ -103,25 +120,54 @@
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0,0,0,0.85);
+            background: none;
             z-index: 20;
-            flex-direction: column;
             justify-content: center;
             align-items: center;
+        }
+
+        #win-message-temp {
+            position: absolute;
+            top: 40%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 4rem;
+            font-weight: bold;
             color: white;
+            text-shadow: 0 0 20px #4ade80;
+            opacity: 0;
+            transition: opacity 0.3s;
+            z-index: 21;
+            text-align: center;
+            width: 100%;
         }
-
-        #win-title {
-            font-size: 3rem;
-            color: #ffff00;
-            text-shadow: 0 0 20px #ffff00;
-            margin-bottom: 10px;
-            animation: popIn 0.5s ease-out;
+        
+        #win-3d-view {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            border: none; 
+            background: #87CEEB; /* Sky blue background matching game */
+            touch-action: none; 
+            display: none; 
         }
-
-        @keyframes popIn {
-            from { transform: scale(0); opacity: 0; }
-            to { transform: scale(1); opacity: 1; }
+        
+        #floating-stats-panel {
+            position: fixed; 
+            top: 20px; 
+            right: 20px; 
+            background: rgba(0, 20, 40, 0.8); 
+            border: 1px solid #4ade80; 
+            padding: 15px; 
+            border-radius: 8px; 
+            box-shadow: 0 0 10px rgba(74, 222, 128, 0.5);
+            z-index: 30;
+            text-align: left;
+            font-family: 'Courier New', monospace;
+            font-size: 1.1rem;
+            color: white;
         }
 
         .btn {
@@ -155,7 +201,7 @@
 
         /* Mobile Controls */
         #mobile-controls {
-            display: none; /* Hidden on desktop by default, shown via JS detection or media query */
+            display: none; 
             position: absolute;
             bottom: 20px;
             left: 20px;
@@ -191,7 +237,6 @@
             pointer-events: none;
         }
         
-        /* Right side touch zone for looking */
         #look-zone {
             position: absolute;
             top: 0;
@@ -205,6 +250,9 @@
     </style>
 </head>
 <body>
+    <!-- Transition Overlay -->
+    <div id="transition-overlay"></div>
+
     <!-- HUD -->
     <div id="hud" class="hud-text">
         <div>Height: <span id="height-display">0.00</span></div>
@@ -213,9 +261,8 @@
 
     <!-- Win Overlay -->
     <div id="win-overlay">
-        <div id="win-title">GLOBAL MINIMUM FOUND!</div>
-        <div id="win-stats"></div> <!-- Text grid goes here -->
-        <!-- Play Again button moved inside the JS generated content for consistent centering -->
+        <div id="win-message-temp">ERROR MINIMIZED!</div>
+        <canvas id="win-3d-view"></canvas>
     </div>
 
     <!-- Bottom Right HUD -->
@@ -227,7 +274,7 @@
     </div>
     
     <!-- Bottom Center Seed -->
-    <div id="seed-display">Daily Seed: <span id="seed-value">LOADING...</span></div>
+    <div id="seed-display">Date: <span id="seed-value">LOADING...</span></div>
 
     <!-- Mobile Controls -->
     <div id="mobile-controls">
@@ -258,8 +305,6 @@
             const now = new Date();
             const options = { timeZone: 'America/Chicago', year: 'numeric', month: 'numeric', day: 'numeric' };
             const dateString = now.toLocaleDateString('en-US', options);
-            
-            // Display Seed
             document.getElementById('seed-value').textContent = dateString;
             
             let hash = 0;
@@ -289,26 +334,22 @@
         let prevTime = performance.now();
         let velocity = new THREE.Vector3();
         let direction = new THREE.Vector3();
-
-        // Touch Input State
-        let touchMoveX = 0; 
-        let touchMoveY = 0; 
+        let touchMoveX = 0, touchMoveY = 0; 
 
         let terrainMesh;
         let birds = [];
         let grassSystem;
+        let trunkMesh, leavesMesh; 
 
         let globalMinima = { x: 0, z: 0, depth: 0 };
         let localMinimas = [];
 
-        // Audio Context
         let audioCtx;
         let masterGain;
         let delayNode;
         let nextBirdTime = 0;
         let nextNoteTime = 0;
 
-        // Minimap
         const minimapCanvas = document.getElementById('minimap');
         const minimapCtx = minimapCanvas.getContext('2d');
         const MAP_SIZE = 180;
@@ -322,10 +363,13 @@
         let startTime = 0;
         let elapsedTimeString = "00:00";
 
-        // --- Terrain Generation Logic (Using Seeded Random) ---
+        // --- Win Scene Components ---
+        let winScene, winCamera, winRenderer, winControls;
+        let winSceneCanvas;
+
+        // --- Terrain Generation Logic ---
         function generateMinimaLocations() {
             localMinimas = [];
-
             globalMinima.x = (seededRandom() * 0.8 - 0.4) * WORLD_SIZE;
             globalMinima.z = (seededRandom() * 0.8 - 0.4) * WORLD_SIZE;
             globalMinima.depth = 20 + seededRandom() * 5;
@@ -354,29 +398,105 @@
         function getTerrainHeight(x, z) {
             let y = Math.sin(x * 0.05) * Math.cos(z * 0.05) * 4;
             y += Math.sin(x * 0.02 + 10) * Math.cos(z * 0.02 + 10) * 6;
-
             let distSqGlobal = (x - globalMinima.x) ** 2 + (z - globalMinima.z) ** 2;
             let globalGauss = globalMinima.depth * Math.exp(-distSqGlobal / 300);
             y -= globalGauss;
-
             localMinimas.forEach(min => {
                 let distSq = (x - min.x) ** 2 + (z - min.z) ** 2;
                 let localGauss = min.depth * Math.exp(-distSq / (min.width * 15));
                 y -= localGauss;
             });
-
             y += Math.sin(x * 0.2) * Math.cos(z * 0.2) * 0.3;
-
             return y;
         }
 
-        // --- Audio System ---
+        // --- Soil Generation ---
+        function createSoilMesh() {
+            const baseHeight = -40; // The depth of the soil block
+            const geometry = new THREE.BufferGeometry();
+            const vertices = [];
+            const step = WORLD_SIZE / SEGMENTS;
+            
+            function addPanel(x1, z1, x2, z2) {
+                const y1 = getTerrainHeight(x1, z1);
+                const y2 = getTerrainHeight(x2, z2);
+                // Triangle 1
+                vertices.push(x1, y1, z1);
+                vertices.push(x1, baseHeight, z1);
+                vertices.push(x2, y2, z2);
+                // Triangle 2
+                vertices.push(x2, y2, z2);
+                vertices.push(x1, baseHeight, z1);
+                vertices.push(x2, baseHeight, z2);
+            }
+            
+            // North Edge
+            for(let i=0; i<SEGMENTS; i++) {
+                const x1 = -HALF_WORLD + i * step;
+                const x2 = -HALF_WORLD + (i+1) * step;
+                addPanel(x1, -HALF_WORLD, x2, -HALF_WORLD);
+            }
+            // East Edge
+            for(let i=0; i<SEGMENTS; i++) {
+                const z1 = -HALF_WORLD + i * step;
+                const z2 = -HALF_WORLD + (i+1) * step;
+                addPanel(HALF_WORLD, z1, HALF_WORLD, z2);
+            }
+            // South Edge
+            for(let i=0; i<SEGMENTS; i++) {
+                const x1 = HALF_WORLD - i * step;
+                const x2 = HALF_WORLD - (i+1) * step;
+                addPanel(x1, HALF_WORLD, x2, HALF_WORLD);
+            }
+            // West Edge
+            for(let i=0; i<SEGMENTS; i++) {
+                const z1 = HALF_WORLD - i * step;
+                const z2 = HALF_WORLD - (i+1) * step;
+                addPanel(-HALF_WORLD, z1, -HALF_WORLD, z2);
+            }
+
+            // Bottom Cap
+            vertices.push(-HALF_WORLD, baseHeight, -HALF_WORLD);
+            vertices.push(HALF_WORLD, baseHeight, -HALF_WORLD);
+            vertices.push(-HALF_WORLD, baseHeight, HALF_WORLD);
+            vertices.push(HALF_WORLD, baseHeight, -HALF_WORLD);
+            vertices.push(HALF_WORLD, baseHeight, HALF_WORLD);
+            vertices.push(-HALF_WORLD, baseHeight, HALF_WORLD);
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            geometry.computeVertexNormals();
+            
+            return new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ 
+                color: 0x5d4037, 
+                roughness: 1.0,
+                flatShading: true,
+                side: THREE.DoubleSide
+            }));
+        }
+
+        // --- Audio ---
+        function playWhooshSound() {
+            if (!audioCtx) return;
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(50, now);
+            osc.frequency.linearRampToValueAtTime(1200, now + 2.0);
+            gain.gain.setValueAtTime(0.001, now);
+            gain.gain.linearRampToValueAtTime(0.3, now + 1.0);
+            gain.gain.linearRampToValueAtTime(0, now + 2.0);
+            osc.connect(gain);
+            gain.connect(masterGain);
+            osc.start(now);
+            osc.stop(now + 2.0);
+        }
+
         function initAudio() {
             const AudioContext = window.AudioContext || window.webkitAudioContext;
             audioCtx = new AudioContext();
             masterGain = audioCtx.createGain();
             masterGain.gain.value = 0.4;
-
             delayNode = audioCtx.createDelay();
             delayNode.delayTime.value = 0.4; 
             const delayFeedback = audioCtx.createGain();
@@ -384,16 +504,12 @@
             const delayFilter = audioCtx.createBiquadFilter();
             delayFilter.type = 'lowpass';
             delayFilter.frequency.value = 1000;
-
             delayNode.connect(delayFeedback);
             delayFeedback.connect(delayFilter);
             delayFilter.connect(delayNode);
-
             delayNode.connect(masterGain);
             masterGain.connect(audioCtx.destination);
-
             startAmbience();
-
             nextNoteTime = audioCtx.currentTime + 0.5;
             nextBirdTime = audioCtx.currentTime + 2.0;
         }
@@ -402,7 +518,6 @@
             const bufferSize = 2 * audioCtx.sampleRate;
             const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
             const output = noiseBuffer.getChannelData(0);
-
             let lastOut = 0;
             for (let i = 0; i < bufferSize; i++) {
                 const white = Math.random() * 2 - 1;
@@ -410,18 +525,14 @@
                 lastOut = output[i];
                 output[i] *= 3.5;
             }
-
             const noise = audioCtx.createBufferSource();
             noise.buffer = noiseBuffer;
             noise.loop = true;
-
             const filter = audioCtx.createBiquadFilter();
             filter.type = 'lowpass';
             filter.frequency.value = 150; 
-
             const windGain = audioCtx.createGain();
             windGain.gain.value = 0.6;
-
             noise.connect(filter);
             filter.connect(windGain);
             windGain.connect(masterGain);
@@ -432,27 +543,20 @@
             const notes = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25];
             const freq = notes[Math.floor(Math.random() * notes.length)];
             const now = audioCtx.currentTime;
-
             const osc1 = audioCtx.createOscillator();
             const osc2 = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
-
             osc1.type = 'sine';
             osc2.type = 'triangle';
-
             osc1.frequency.setValueAtTime(freq, now);
             osc2.frequency.setValueAtTime(freq * 1.002, now); 
-
             gain.gain.setValueAtTime(0, now);
             gain.gain.linearRampToValueAtTime(0.1, now + 1.5); 
             gain.gain.exponentialRampToValueAtTime(0.001, now + 5.0); 
-
             osc1.connect(gain);
             osc2.connect(gain);
-
             gain.connect(masterGain);
             gain.connect(delayNode);
-
             osc1.start();
             osc2.start();
             osc1.stop(now + 6.0);
@@ -463,28 +567,22 @@
             const now = audioCtx.currentTime;
             const osc = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
-
             osc.type = 'sine';
-
             const startFreq = 2500 + Math.random() * 1000;
             osc.frequency.setValueAtTime(startFreq, now);
             osc.frequency.exponentialRampToValueAtTime(startFreq + 500, now + 0.05);
             osc.frequency.exponentialRampToValueAtTime(startFreq - 300, now + 0.15);
             osc.frequency.linearRampToValueAtTime(startFreq + 200, now + 0.25);
-
             gain.gain.setValueAtTime(0, now);
             gain.gain.linearRampToValueAtTime(0.05, now + 0.02);
             gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-
             const filter = audioCtx.createBiquadFilter();
             filter.type = 'bandpass';
             filter.frequency.value = 3000;
-
             osc.connect(filter);
             filter.connect(gain);
             gain.connect(masterGain);
             gain.connect(delayNode);
-
             osc.start();
             osc.stop(now + 0.5);
         }
@@ -494,20 +592,14 @@
             const gain = audioCtx.createGain();
             osc.type = 'triangle';
             const now = audioCtx.currentTime;
-
-            osc.frequency.setValueAtTime(523.25, now);
-            osc.frequency.setValueAtTime(659.25, now + 0.2);
-            osc.frequency.setValueAtTime(783.99, now + 0.4);
-
+            osc.frequency.setValueAtTime(783.99, now);
             gain.gain.setValueAtTime(0, now);
-            gain.gain.linearRampToValueAtTime(0.2, now + 0.2);
-            gain.gain.linearRampToValueAtTime(0, now + 2.5);
-
+            gain.gain.linearRampToValueAtTime(0.2, now + 0.1);
+            gain.gain.linearRampToValueAtTime(0, now + 1.0);
             osc.connect(gain);
             gain.connect(masterGain);
-            gain.connect(delayNode);
             osc.start();
-            osc.stop(now + 3);
+            osc.stop(now + 1.5);
         }
 
         // --- Initialization ---
@@ -564,33 +656,28 @@
             terrainMesh.receiveShadow = true;
             scene.add(terrainMesh);
 
-            // Trees
             const treeCount = 350;
             const trunkGeo = new THREE.CylinderGeometry(0.3, 0.5, 2, 6);
             const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5c4033 });
             const leavesGeo = new THREE.IcosahedronGeometry(2.5, 0);
             const leavesMat = new THREE.MeshStandardMaterial({ color: 0x3a7a3a, flatShading: true });
-
-            const trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, treeCount);
-            const leavesMesh = new THREE.InstancedMesh(leavesGeo, leavesMat, treeCount);
+            trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, treeCount);
+            leavesMesh = new THREE.InstancedMesh(leavesGeo, leavesMat, treeCount);
 
             const dummy = new THREE.Object3D();
             let tIdx = 0;
-
             for (let i = 0; i < treeCount * 2; i++) {
                 if (tIdx >= treeCount) break;
                 const x = (seededRandom() - 0.5) * WORLD_SIZE;
                 const z = (seededRandom() - 0.5) * WORLD_SIZE;
                 const y = getTerrainHeight(x, z);
                 if (y < -5) continue;
-
                 const scaleMod = 0.8 + seededRandom() * 0.6;
                 dummy.position.set(x, y + 1.0 * scaleMod, z);
                 dummy.rotation.set(0, seededRandom() * Math.PI, 0);
                 dummy.scale.set(scaleMod, scaleMod, scaleMod);
                 dummy.updateMatrix();
                 trunkMesh.setMatrixAt(tIdx, dummy.matrix);
-
                 dummy.position.set(x, y + 2.8 * scaleMod, z);
                 dummy.scale.set(scaleMod, scaleMod, scaleMod);
                 dummy.updateMatrix();
@@ -604,28 +691,21 @@
             scene.add(trunkMesh);
             scene.add(leavesMesh);
 
-            // Grass
             const grassClumps = 1000;
             const bladesPerClump = 3;
             const totalGrassInstances = grassClumps * bladesPerClump;
-
             const grassGeo = new THREE.ConeGeometry(0.15, 0.6, 3);
             const grassMat = new THREE.MeshStandardMaterial({ color: 0x8fd66a, flatShading: true });
             grassSystem = new THREE.InstancedMesh(grassGeo, grassMat, totalGrassInstances);
-
             let gIdx = 0;
             for (let i = 0; i < grassClumps * 2; i++) {
                 if (gIdx >= totalGrassInstances) break;
-
                 const cx = (seededRandom() - 0.5) * WORLD_SIZE;
                 const cz = (seededRandom() - 0.5) * WORLD_SIZE;
                 const cy = getTerrainHeight(cx, cz);
-
                 if (cy < -15) continue;
-
                 for (let j = 0; j < bladesPerClump; j++) {
                     if (gIdx >= totalGrassInstances) break;
-
                     const ox = (seededRandom() - 0.5) * 0.5;
                     const oz = (seededRandom() - 0.5) * 0.5;
                     dummy.position.set(cx + ox, cy + 0.3, cz + oz);
@@ -642,12 +722,10 @@
             }
             scene.add(grassSystem);
 
-            // Birds
             const birdGeo = new THREE.BufferGeometry();
             const birdVerts = new Float32Array([0.2, 0, 0, -0.2, 0, 0, 0, 0, 0.2]);
             birdGeo.setAttribute('position', new THREE.BufferAttribute(birdVerts, 3));
             const birdMat = new THREE.MeshBasicMaterial({ color: 0x222222, side: THREE.DoubleSide });
-
             for (let i = 0; i < 15; i++) {
                 const bird = new THREE.Mesh(birdGeo, birdMat);
                 bird.userData = {
@@ -672,7 +750,6 @@
             controls.add(camera);
             scene.add(controls);
 
-            // Spawn point logic
             let safe = false;
             let attempts = 0;
             while (!safe && attempts < 100) {
@@ -688,7 +765,6 @@
             animate();
         }
 
-        // --- Input Handling ---
         function setupInputListeners() {
             document.addEventListener('keydown', (e) => {
                 switch (e.code) {
@@ -710,8 +786,7 @@
             });
             document.addEventListener('mousemove', onMouseMove);
             window.addEventListener('resize', onWindowResize);
-
-            // Touch Controls
+            
             const joystickZone = document.getElementById('joystick-zone');
             const joystickKnob = document.getElementById('joystick-knob');
             const lookZone = document.getElementById('look-zone');
@@ -720,12 +795,10 @@
                 e.preventDefault();
                 handleJoystick(e.touches[0], joystickZone, joystickKnob);
             }, {passive: false});
-
             joystickZone.addEventListener('touchmove', (e) => {
                 e.preventDefault();
                 handleJoystick(e.touches[0], joystickZone, joystickKnob);
             }, {passive: false});
-
             joystickZone.addEventListener('touchend', (e) => {
                 e.preventDefault();
                 touchMoveX = 0;
@@ -733,27 +806,21 @@
                 joystickKnob.style.transform = `translate(-50%, -50%)`;
             });
 
-            // Look Logic
-            let lastTouchX = 0;
-            let lastTouchY = 0;
+            let lastTouchX = 0, lastTouchY = 0;
             lookZone.addEventListener('touchstart', (e) => {
                 lastTouchX = e.touches[0].clientX;
                 lastTouchY = e.touches[0].clientY;
             });
-            
             lookZone.addEventListener('touchmove', (e) => {
                 e.preventDefault(); 
                 const touch = e.touches[0];
                 const deltaX = touch.clientX - lastTouchX;
                 const deltaY = touch.clientY - lastTouchY;
-                
                 yaw -= deltaX * 0.005;
                 pitch -= deltaY * 0.005;
                 pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
-                
                 controls.rotation.y = yaw;
                 camera.rotation.x = pitch;
-                
                 lastTouchX = touch.clientX;
                 lastTouchY = touch.clientY;
             }, {passive: false});
@@ -763,20 +830,15 @@
             const rect = zone.getBoundingClientRect();
             const centerX = rect.left + rect.width / 2;
             const centerY = rect.top + rect.height / 2;
-            
             const maxDist = rect.width / 2;
-            
             let dx = touch.clientX - centerX;
             let dy = touch.clientY - centerY;
             const dist = Math.sqrt(dx*dx + dy*dy);
-            
             if(dist > maxDist) {
                 dx = (dx / dist) * maxDist;
                 dy = (dy / dist) * maxDist;
             }
-            
             knob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
-            
             touchMoveX = dx / maxDist;
             touchMoveY = dy / maxDist;
         }
@@ -818,6 +880,122 @@
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
+            if (winCamera && winRenderer) {
+                winCamera.aspect = window.innerWidth / window.innerHeight;
+                winCamera.updateProjectionMatrix();
+                winRenderer.setSize(window.innerWidth, window.innerHeight);
+            }
+        }
+        
+        function calculateTotalDistance(path) {
+            let dist = 0;
+            if (path.length > 1) {
+                for (let i = 1; i < path.length; i++) {
+                    const pdx = path[i].x - path[i - 1].x;
+                    const pdz = path[i].z - path[i - 1].z;
+                    dist += Math.sqrt(pdx * pdx + pdz * pdz);
+                }
+            }
+            return dist;
+        }
+
+        function initWinScene(path, totalDist) {
+            winSceneCanvas = document.getElementById('win-3d-view');
+            const WIDTH = window.innerWidth;
+            const HEIGHT = window.innerHeight; 
+            
+            winScene = new THREE.Scene();
+            winScene.background = new THREE.Color(0x87CEEB); 
+
+            winCamera = new THREE.PerspectiveCamera(50, WIDTH / HEIGHT, 1, 1000);
+            winCamera.position.set(WORLD_SIZE * 0.8, WORLD_SIZE * 0.5, WORLD_SIZE * 0.8); 
+            winCamera.lookAt(0, 0, 0);
+
+            winRenderer = new THREE.WebGLRenderer({ antialias: true, canvas: winSceneCanvas });
+            winRenderer.setSize(WIDTH, HEIGHT);
+            winRenderer.shadowMap.enabled = true;
+            winRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+            const light = new THREE.DirectionalLight(0xffffff, 1.5);
+            light.position.set(50, 100, 50);
+            winScene.add(light);
+            winScene.add(new THREE.AmbientLight(0x404040));
+
+            const winTerrain = new THREE.Mesh(terrainMesh.geometry, terrainMesh.material);
+            winTerrain.receiveShadow = true;
+            winScene.add(winTerrain);
+
+            // Add Soil Block (Skirt)
+            const soilMesh = createSoilMesh();
+            winScene.add(soilMesh);
+
+            if (trunkMesh && leavesMesh && grassSystem) {
+                winScene.add(trunkMesh.clone());
+                winScene.add(leavesMesh.clone());
+                winScene.add(grassSystem.clone());
+            }
+
+            const points = path.map(p => new THREE.Vector3(p.x, getTerrainHeight(p.x, p.z) + 0.8, p.z));
+            const pathCurve = new THREE.CatmullRomCurve3(points);
+            const tubeGeometry = new THREE.TubeGeometry(pathCurve, path.length, 0.5, 8, false); 
+            const pathMaterial = new THREE.MeshBasicMaterial({ color: 0xffa500 });
+            const pathTube = new THREE.Mesh(tubeGeometry, pathMaterial);
+            winScene.add(pathTube);
+
+            // 4. Add Minima Marker (Flag Pole)
+            const minHeight = getTerrainHeight(globalMinima.x, globalMinima.z);
+            const flagGroup = new THREE.Group();
+            flagGroup.position.set(globalMinima.x, minHeight, globalMinima.z);
+
+            // Pole
+            const poleGeo = new THREE.CylinderGeometry(0.15, 0.15, 12, 8);
+            const poleMat = new THREE.MeshStandardMaterial({ color: 0xc0c0c0, roughness: 0.4, metalness: 0.6 });
+            const pole = new THREE.Mesh(poleGeo, poleMat);
+            pole.position.y = 6; // Move up so base is at terrain level
+            pole.castShadow = true;
+            flagGroup.add(pole);
+
+            // Flag
+            const flagGeo = new THREE.BoxGeometry(4, 2.5, 0.1);
+            const flagMat = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0x440000, side: THREE.DoubleSide });
+            const flag = new THREE.Mesh(flagGeo, flagMat);
+            flag.position.set(2, 10.5, 0); // Offset to side of pole, near top
+            flagGroup.add(flag);
+
+            winScene.add(flagGroup);
+            
+            if(typeof THREE.OrbitControls !== 'undefined') { 
+                 winControls = new THREE.OrbitControls(winCamera, winRenderer.domElement);
+                 winControls.enableDamping = true;
+                 winControls.dampingFactor = 0.05;
+                 winControls.screenSpacePanning = false;
+                 winControls.minDistance = 20;
+                 winControls.maxDistance = 500;
+                 winControls.target.set(0, minHeight, 0); 
+                 winControls.update();
+            }
+
+            const dateStr = document.getElementById('seed-value').textContent;
+            const statsFloat = document.createElement('div');
+            statsFloat.id = 'floating-stats-panel'; 
+            statsFloat.innerHTML = `
+                <p style="font-size: 1.5rem; font-weight: bold; color: #ffff00; margin: 0 0 10px 0; text-align: center;">DELTA</p>
+                <p style="margin: 5px 0;">📅 Date: <span style="color:#4ade80">${dateStr}</span></p>
+                <p style="margin: 5px 0;">⏱️ Time Taken: <span style="color:#4ade80">${elapsedTimeString}</span></p>
+                <p style="margin: 5px 0;">👣 Distance Walked: <span style="color:#4ade80">${Math.round(totalDist)}m</span></p>
+                <button onclick="location.reload()" style="background: transparent; color: #aaa; border: 1px solid #aaa; padding: 8px 16px; border-radius: 4px; cursor: pointer; display: block; width: 100%; margin-top: 10px;">Play Again</button>
+            `;
+            document.body.appendChild(statsFloat);
+            
+            winSceneCanvas.style.display = 'block';
+            animateWinScene();
+        }
+
+        function animateWinScene() {
+            if (!hasWon) return; 
+            requestAnimationFrame(animateWinScene);
+            if (winControls) winControls.update();
+            if (winRenderer) winRenderer.render(winScene, winCamera);
         }
 
         function updateTimer(time) {
@@ -832,14 +1010,9 @@
             minimapCtx.clearRect(0, 0, MAP_SIZE, MAP_SIZE);
             minimapCtx.fillStyle = 'rgba(0, 20, 30, 0.8)';
             minimapCtx.fillRect(0, 0, MAP_SIZE, MAP_SIZE);
-
             const scale = MAP_SIZE / WORLD_SIZE;
-            
             minimapCtx.strokeStyle = 'rgba(74, 222, 128, 0.2)'; 
             minimapCtx.lineWidth = 1;
-            minimapCtx.font = '10px monospace';
-            minimapCtx.fillStyle = 'rgba(74, 222, 128, 0.5)';
-
             for(let worldX = -100; worldX <= 100; worldX += 50) {
                 const x = (worldX + HALF_WORLD) * scale;
                 minimapCtx.beginPath(); minimapCtx.moveTo(x, 0); minimapCtx.lineTo(x, MAP_SIZE); minimapCtx.stroke();
@@ -848,8 +1021,6 @@
                 const z = (worldZ + HALF_WORLD) * scale;
                 minimapCtx.beginPath(); minimapCtx.moveTo(0, z); minimapCtx.lineTo(MAP_SIZE, z); minimapCtx.stroke();
             }
-
-            // Path
             if(pathHistory.length > 1) {
                 minimapCtx.strokeStyle = 'rgba(255, 255, 50, 0.8)';
                 minimapCtx.lineWidth = 2;
@@ -862,15 +1033,12 @@
                 }
                 minimapCtx.stroke();
             }
-
-            // Player Arrow
             const px = (controls.position.x + HALF_WORLD) * scale;
             const pz = (controls.position.z + HALF_WORLD) * scale;
-            
             if(px >= 0 && px <= MAP_SIZE && pz >= 0 && pz <= MAP_SIZE) {
                 minimapCtx.save();
                 minimapCtx.translate(px, pz);
-                minimapCtx.rotate(-yaw + 2 * Math.PI); 
+                minimapCtx.rotate(-yaw); 
                 minimapCtx.fillStyle = '#00ff00';
                 minimapCtx.beginPath();
                 minimapCtx.moveTo(0, -6);
@@ -893,118 +1061,86 @@
                 if (Math.abs(currentHeight - expectedLow) < 3.0) {
                     hasWon = true;
                     
-                    // Calculate total distance
-                    let totalDist = 0;
-                    if(pathHistory.length > 1) {
-                        for(let i=1; i<pathHistory.length; i++) {
-                            const pdx = pathHistory[i].x - pathHistory[i-1].x;
-                            const pdz = pathHistory[i].z - pathHistory[i-1].z;
-                            totalDist += Math.sqrt(pdx*pdx + pdz*pdz);
+                    document.getElementById('win-message-temp').style.opacity = 1;
+                    document.exitPointerLock();
+                    playWhooshSound();
+                    
+                    // Trigger Transition Fade
+                    document.getElementById('transition-overlay').style.opacity = 1;
+                    
+                    // Animate Ascent
+                    const ascentDuration = 2000;
+                    const startTime = performance.now();
+                    const startY = controls.position.y;
+                    const targetY = startY + 100; 
+
+                    function animateAscension(t) {
+                        const elapsed = t - startTime;
+                        const progress = Math.min(1, elapsed / ascentDuration);
+                        
+                        // Smooth step-up
+                        controls.position.y = startY + (targetY - startY) * (progress * progress);
+                        
+                        if (progress < 1) {
+                            requestAnimationFrame(animateAscension);
+                        } else {
+                            // Swap to Win Scene (hidden behind white overlay)
+                            document.getElementById('hud-container').style.display = 'none';
+                            document.getElementById('win-message-temp').style.display = 'none';
+                            renderer.domElement.style.display = 'none';
+                            document.getElementById('win-overlay').style.display = 'flex';
+                            
+                            const totalDist = calculateTotalDistance(pathHistory);
+                            initWinScene(pathHistory, totalDist);
+                            playWinSound();
+                            
+                            // Reveal Scene
+                            document.getElementById('transition-overlay').style.opacity = 0;
                         }
                     }
-
-                    const dateStr = document.getElementById('seed-value').textContent;
-                    const resultString = `
-🟩🟨🟩🟨🟩🟨
-🔼 DELTA
-📅 ${dateStr}
-⏱️ ${elapsedTimeString}
-👣 ${Math.round(totalDist)}m
-🟩🟨🟩🟨🟩🟨
-                    `.trim();
-
-                    const statsContainer = document.getElementById('win-stats');
-                    // Updated the structure to center the button consistently below the box
-                    statsContainer.innerHTML = `
-                        <div style="font-family: 'Courier New', monospace; font-size: 1.2rem; color: white; background: rgba(0,20,40,0.8); padding: 20px; border: 2px solid #4ade80; border-radius: 10px; margin-bottom: 20px; white-space: pre; line-height: 1.5;">${resultString}</div>
-                        <button id="copy-text-btn" style="background: transparent; border: 1px solid #4ade80; color: #4ade80; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-bottom: 10px; font-weight:bold;">Copy Results</button>
-                        <button onclick="location.reload()" style="background: transparent; color: #aaa; border: 1px solid #aaa; padding: 8px 16px; border-radius: 4px; cursor: pointer;">Play Again</button>
-                    `;
-                    
-                    // Remove old "Play Again" button from the overlay as it's now inside the stats container
-                    const oldPlayAgainButton = document.querySelector('#win-overlay > button:last-child');
-                    if(oldPlayAgainButton && oldPlayAgainButton.innerText === 'Play Again') {
-                        oldPlayAgainButton.remove();
-                    }
-
-                    document.getElementById('copy-text-btn').addEventListener('click', function() {
-                        const ta = document.createElement('textarea');
-                        ta.value = resultString;
-                        document.body.appendChild(ta);
-                        ta.select();
-                        document.execCommand('copy');
-                        document.body.removeChild(ta);
-                        const originalText = this.innerText;
-                        this.innerText = "Copied!";
-                        setTimeout(() => this.innerText = originalText, 2000);
-                    });
-
-                    document.getElementById('win-overlay').style.display = 'flex';
-                    document.exitPointerLock();
-                    playWinSound();
+                    requestAnimationFrame(animateAscension);
                 }
             }
         }
 
         function animate() {
             requestAnimationFrame(animate);
-
             const time = performance.now();
             const delta = (time - prevTime) / 1000;
             prevTime = time;
-
             if (isPlaying && !hasWon) {
                 updateTimer(time);
-                
                 if (audioCtx && audioCtx.currentTime > nextNoteTime) {
                     playMusicNote();
                     nextNoteTime = audioCtx.currentTime + 2 + Math.random() * 3;
                 }
-
                 if (audioCtx && audioCtx.currentTime > nextBirdTime) {
                     if (Math.random() < 0.4) playBirdChirp();
                     nextBirdTime = audioCtx.currentTime + 1.5 + Math.random() * 4.0;
                 }
-
-                // Movement (Keyboard + Touch)
                 velocity.x -= velocity.x * 10.0 * delta;
                 velocity.z -= velocity.z * 10.0 * delta;
-                
-                // Combine keyboard and touch inputs
                 const inputZ = (Number(moveBackward) - Number(moveForward)) + touchMoveY;
                 const inputX = (Number(moveRight) - Number(moveLeft)) + touchMoveX;
-
                 direction.z = Math.max(-1, Math.min(1, inputZ));
                 direction.x = Math.max(-1, Math.min(1, inputX));
-                
-                // Normalize diagonal speed if needed, though simple clamping is okay for this vibe
                 if (direction.lengthSq() > 1) direction.normalize();
-
                 const speed = shiftPressed ? 15.0 : 7.0;
-
                 if (direction.z !== 0) velocity.z -= direction.z * 50.0 * delta * (speed / 7.0);
                 if (direction.x !== 0) velocity.x -= direction.x * 50.0 * delta * (speed / 7.0);
-
                 const sinY = Math.sin(yaw);
                 const cosY = Math.cos(yaw);
-
                 const dx = -(velocity.z * sinY) - (velocity.x * cosY);
                 const dz = -(velocity.z * cosY) + (velocity.x * sinY);
-
                 controls.position.x += dx * delta;
                 controls.position.z += dz * delta;
-
-                // Boundary checks
                 if (controls.position.x < -HALF_WORLD) controls.position.x = -HALF_WORLD;
                 if (controls.position.x > HALF_WORLD) controls.position.x = HALF_WORLD;
                 if (controls.position.z < -HALF_WORLD) controls.position.z = -HALF_WORLD;
                 if (controls.position.z > HALF_WORLD) controls.position.z = HALF_WORLD;
-
                 const terrainH = getTerrainHeight(controls.position.x, controls.position.z);
                 controls.position.y = terrainH + 1.2;
-
                 document.getElementById('height-display').innerText = terrainH.toFixed(2);
-
                 birds.forEach(bird => {
                     const bTime = time * 0.001 * bird.userData.speed;
                     bird.position.x = Math.sin(bTime + bird.userData.angle) * bird.userData.radius;
@@ -1012,8 +1148,6 @@
                     bird.position.y = bird.userData.centerY + Math.sin(bTime * 3) * 2;
                     bird.rotation.y = -bTime - bird.userData.angle;
                 });
-
-                // --- Record Path ---
                 if(pathHistory.length === 0) {
                     pathHistory.push({x: controls.position.x, z: controls.position.z});
                 } else {
@@ -1024,10 +1158,8 @@
                         if(pathHistory.length > 800) pathHistory.shift();
                     }
                 }
-
                 checkWinCondition(terrainH, controls.position.x, controls.position.z);
             }
-
             updateMinimap();
             renderer.render(scene, camera);
         }
